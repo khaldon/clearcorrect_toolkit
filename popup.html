@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>ClearComm Toolkits</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+<div class="app">
+
+  <header class="app-header">
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M7 3C4.8 3 3 4.8 3 7.2c0 2.2 1 3.5 1.6 5.6.5 1.9.6 5.2 2 5.2 1.6 0 1.2-4 3.4-4s1.8 4 3.4 4c1.4 0 1.5-3.3 2-5.2.6-2.1 1.6-3.4 1.6-5.6C21 4.8 19.2 3 17 3c-1.7 0-2.6.9-5 .9S8.7 3 7 3z"/>
+      </svg>
+      <div>
+        <h1>ClearComm Toolkits</h1>
+        <p class="tagline">Notes and portal reminders for ClearCorrect</p>
+      </div>
+    </div>
+    <div id="case-pill" class="pill idle" title="Case detected on the current tab">Detecting case…</div>
+  </header>
+
+  <div id="snackbar" class="snackbar" role="status" aria-live="polite"></div>
+
+  <nav class="tabs" role="tablist" aria-label="Tools">
+    <button class="tab" role="tab" data-tab="notes" id="tab-notes" aria-controls="panel-notes" aria-selected="true">Notes</button>
+    <button class="tab" role="tab" data-tab="settings" id="tab-settings" aria-controls="panel-settings" aria-selected="false" tabindex="-1">Settings</button>
+  </nav>
+
+  <!-- ============ NOTES ============ -->
+  <section class="panel notes-panel" id="panel-notes" role="tabpanel" aria-labelledby="tab-notes">
+    <div class="scroll">
+      <div id="login-card" class="card form-card" hidden>
+        <div class="form-head">
+          <h3>Welcome! One quick step</h3>
+        </div>
+        <p class="lead">Log in once to connect your ClearCorrect username to your activity log.</p>
+        <button id="login-btn" class="btn primary block" type="button">Log in with my portal account</button>
+        <p id="login-hint" class="muted small"></p>
+      </div>
+
+      <div id="draft-warning" class="banner warn" hidden>
+        <span id="draft-warning-text"></span>
+        <button id="draft-clear" class="link-btn" type="button">Clear note</button>
+      </div>
+
+      <h2 class="section-title">What did you fix?</h2>
+      <div id="category-groups" class="category-groups"></div>
+
+      <div id="form-card" class="card form-card" hidden>
+        <div class="form-head">
+          <h3 id="form-title"></h3>
+          <button id="form-close" class="icon-btn" type="button" aria-label="Close" title="Close">×</button>
+        </div>
+        <div id="form-fields"></div>
+        <p id="form-preview" class="preview empty" aria-live="polite"></p>
+        <button id="add-btn" class="btn primary block" type="button" disabled>Add to note</button>
+      </div>
+    </div>
+
+    <div class="dock">
+      <div class="dock-head">
+        <h3>Your note <span id="note-count" class="count">0</span></h3>
+        <button id="clear-notes" class="link-btn" type="button" hidden>Clear all</button>
+      </div>
+      <ul id="note-list" class="note-list" hidden></ul>
+      <p id="note-empty" class="muted empty-note">Pick an issue above, choose the teeth or arch, then add it here.</p>
+      <div class="dock-actions">
+        <button id="copy-btn" class="btn secondary" type="button" disabled>Copy</button>
+        <button id="post-btn" class="btn primary grow" type="button" disabled>Post to portal</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ SETTINGS ============ -->
+  <section class="panel" id="panel-settings" role="tabpanel" aria-labelledby="tab-settings" hidden>
+    <div class="scroll">
+
+      <div class="card settings-card">
+        <h3>Appearance</h3>
+        <div class="setting">
+          <label for="s-theme">Theme</label>
+          <select id="s-theme" data-setting="theme">
+            <option value="auto">Match my computer</option>
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+          </select>
+        </div>
+        <div class="setting">
+          <label for="s-zoom">Text size <span id="zoom-value" class="muted"></span></label>
+          <input id="s-zoom" type="range" min="80" max="130" step="10" data-setting="zoom" data-kind="percent">
+        </div>
+      </div>
+
+      <div class="card settings-card">
+        <h3>Notes</h3>
+        <label class="toggle">
+          <input type="checkbox" data-setting="notes.clearAfterPost">
+          <span class="switch"></span>
+          <span>Clear the note after it is posted</span>
+        </label>
+        <details class="advanced">
+          <summary>Advanced</summary>
+          <label class="toggle">
+            <input type="checkbox" data-setting="notes.autoSubmit">
+            <span class="switch"></span>
+            <span>Save the note automatically<small>Turn off to fill in the note box and review it before saving.</small></span>
+          </label>
+          <div class="setting-pair">
+            <div class="setting"><label for="s-type">Note type value</label><input id="s-type" type="text" inputmode="numeric" data-setting="notes.noteTypeId"></div>
+            <div class="setting"><label for="s-reason">Note reason value</label><input id="s-reason" type="text" inputmode="numeric" data-setting="notes.noteReasonId"></div>
+          </div>
+          <p class="muted small">These are the values of the portal's note type and reason dropdowns. Only change them if the portal changes.</p>
+          <details class="advanced nested">
+            <summary>Edit note wording</summary>
+            <p class="muted small">Change how each sentence is written. Placeholders in curly braces are filled in from your choices.</p>
+            <div id="template-list"></div>
+          </details>
+        </details>
+      </div>
+
+      <div class="card settings-card">
+        <h3>Reminder banner</h3>
+        <label class="toggle">
+          <input type="checkbox" data-setting="toast.enabled">
+          <span class="switch"></span>
+          <span>Show a reminder when a portal page opens</span>
+        </label>
+        <div class="setting">
+          <label for="s-toast-text">Reminder text</label>
+          <input id="s-toast-text" type="text" maxlength="160" data-setting="toast.text">
+        </div>
+        <details class="advanced">
+          <summary>Advanced</summary>
+          <div class="setting-pair">
+            <div class="setting"><label for="s-toast-seconds">Shown for (seconds)</label><input id="s-toast-seconds" type="number" min="1" max="15" step="0.5" data-setting="toast.seconds" data-kind="number"></div>
+            <div class="setting"><label for="s-toast-pos">Position</label>
+              <select id="s-toast-pos" data-setting="toast.position">
+                <option value="top-right">Top right</option>
+                <option value="top-left">Top left</option>
+                <option value="bottom-right">Bottom right</option>
+                <option value="bottom-left">Bottom left</option>
+              </select>
+            </div>
+          </div>
+          <div class="setting"><label for="s-toast-color">Colour</label><input id="s-toast-color" type="color" data-setting="toast.color"></div>
+        </details>
+      </div>
+
+      <div class="card settings-card">
+        <h3>Backup</h3>
+        <div class="row">
+          <button id="export-btn" class="btn secondary grow" type="button">Export settings</button>
+          <button id="import-btn" class="btn secondary grow" type="button">Import settings</button>
+          <input id="import-file" type="file" accept="application/json,.json" hidden>
+        </div>
+        <button id="reset-all" class="btn danger-ghost block" type="button">Reset everything to defaults</button>
+      </div>
+
+      <p class="about">ClearComm Toolkits <span id="version"></span><br>Created by Mohamed khaled</p>
+    </div>
+  </section>
+
+</div>
+
+<script type="module" src="popup.js"></script>
+</body>
+</html>
