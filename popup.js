@@ -2,6 +2,8 @@ import {
   DEFAULT_SETTINGS, GROUPS, NOTE_CATEGORIES, UPPER_ARCH, LOWER_ARCH,
   getSettings, saveSettings, mergeDeep, renderTemplate, templateFor, placeholdersFor
 } from './shared/defaults.js';
+import { resolveEngagerDecision, analyzeEngagerText } from './shared/engagers.js';
+import { collectFromCase } from './shared/collector.js';
 
 /* ================= helpers ================= */
 
@@ -29,7 +31,9 @@ const state = {
   caseId: null,
   category: null,
   form: null,
-  draft: { notes: [], caseId: null }
+  draft: { notes: [], caseId: null },
+  engagerDefaultRaw: '',
+  engagerRxVersion: ''
 };
 
 let flashTimer;
@@ -356,6 +360,317 @@ function addCurrentToNote() {
   flash('Added to your note', 'ok');
 }
 
+/* ================= engagers ================= */
+
+const VERDICT = {
+  KEEP:     { icon: '🟢', label: 'KEEP',                       cls: 'ok' },
+  REMOVE:   { icon: '🔴', label: 'REMOVE',                     cls: 'remove' },
+  CONFLICT: { icon: '⚠️', label: 'CONFLICT - NEED REVIEW',     cls: 'warn' },
+  REVIEW:   { icon: '❔', label: 'NO INSTRUCTION - NEED REVIEW', cls: 'warn' }
+};
+const BADGE_CLASS = { KEEP: 'keep', REMOVE: 'remove', MIXED: 'warn', CONFLICT: 'warn' };
+
+// Highlight colours: engager words teal, KEEP wording green, REMOVE wording red (a negation such as
+// "do not" is highlighted together with the word it reverses).
+function markClass(m) {
+  if (m.kind === 'verb' || m.kind === 'action') return m.decision === 'REMOVE' ? 'eg-mark-remove' : 'eg-mark-keep';
+  return 'eg-mark-term';
+}
+
+// Builds highlighted DOM from the analysed text and the marks analyzeEngagerText returns.
+function buildHighlighted(text, marks) {
+  const frag = document.createDocumentFragment();
+  if (!marks || !marks.length) { frag.append(document.createTextNode(text)); return frag; }
+  let cursor = 0;
+  marks.forEach((m) => {
+    if (m.start < cursor) return;
+    if (m.start > cursor) frag.append(document.createTextNode(text.slice(cursor, m.start)));
+    const mark = document.createElement('mark');
+    mark.className = markClass(m);
+    mark.title = m.kind === 'term' || m.kind === 'topic' ? 'Engager word' : `${m.decision || 'KEEP'} wording${m.negated ? ' (negated)' : ''}`;
+    mark.textContent = text.slice(m.start, m.end);
+    frag.append(mark);
+    cursor = m.end;
+  });
+  if (cursor < text.length) frag.append(document.createTextNode(text.slice(cursor)));
+  return frag;
+}
+
+const decisionName = (d) => (d === 'MIXED' || d === 'CONFLICT' ? 'CONFLICT' : d);
+
+// One line per keyword pair: which instruction word, next to which engager word, in which sentence.
+function evidenceList(evidence, sourceName) {
+  const ul = el('ul', 'eg-evidence');
+  evidence.forEach((ev) => {
+    const li = el('li');
+    const kw = (t) => { const n = el('span', 'eg-kw', t); return n; };
+    if (sourceName === 'default') {
+      li.append('Page value ', kw(`"${ev.action}"`), ` → read as ${ev.decision}`);
+    } else {
+      li.append(kw(`"${ev.action}"`), ev.negated ? ' (negated, so reversed)' : '', ' next to ', kw(`"${ev.term}"`), ` → ${ev.decision}`);
+      if (ev.sentence) { li.append(el('br'), el('q', null, ev.sentence)); }
+    }
+    ul.append(li);
+  });
+  return ul;
+}
+
+// One block per section: title + verdict badge + "DECIDED" badge, optional original/translation, highlighted text.
+function addSectionBlock(wrap, sec, prep) {
+  const block = el('div', `eg-highlight-block${sec.decisive ? ' decisive' : ''}${!sec.decisive && sec.priority !== 2 && !sec.decision ? ' muted-block' : ''}`);
+  const label = el('div', 'eg-highlight-label', sec.id === 'rx' && state.engagerRxVersion ? `${sec.label} - ${state.engagerRxVersion}` : sec.label);
+  const verdictText = sec.decision === 'MIXED' ? 'CONFLICT' : sec.decision || 'no instruction';
+  label.append(el('span', `eg-badge ${BADGE_CLASS[sec.decision] || 'idle'}`, verdictText));
+  if (sec.decisive) label.append(el('span', 'eg-badge used', 'USED FOR THE DECISION'));
+  else if (sec.evidence?.length && sec.priority !== 2) label.append(el('span', 'eg-badge over', 'OVERRIDDEN'));
+  else if (sec.priority === 2) label.append(el('span', 'eg-badge idle', 'NOT NEEDED'));
+  block.append(label);
+
+  if (sec.priority === 2) {
+    block.append(el('div', null, state.engagerDefaultRaw ? `Page value: "${state.engagerDefaultRaw}"${sec.decision ? '' : ' (could not be read as keep or remove)'}` : 'No value read from the page.'));
+  } else if (!sec.text.trim()) {
+    block.append(el('div', 'muted', sec.id === 'rx' ? 'No Rx instructions found in any version.' : 'Empty - nothing written here.'));
+  } else {
+    if (prep?.translated) {
+      const orig = el('div', 'eg-original');
+      const origBody = el('div');
+      origBody.append(buildHighlighted(prep.original, prep.originalMarks));
+      orig.append(el('div', null, `Original (${prep.lang}):`), origBody);
+      block.append(orig);
+      block.append(el('div', 'eg-highlight-label', `English translation (detected: ${prep.lang})`));
+    } else if (prep?.failed) {
+      block.append(el('div', 'eg-note', 'Automatic translation was not available - analysed as written (the built-in multilingual keywords still apply).'));
+    } else if (prep) {
+      block.append(el('div', 'eg-note', 'Language detected: English (no translation needed).'));
+    }
+    const body = el('div');
+    body.append(buildHighlighted(sec.text, sec.marks));
+    block.append(body);
+  }
+  if (sec.evidence?.length && sec.priority !== 2) block.append(evidenceList(sec.evidence, sec.id));
+  if (sec.note) block.append(el('div', 'eg-note', sec.note));
+  wrap.append(block);
+}
+
+// Translation is always on: text that is not English is sent to Google Translate first and the
+// English result goes through the keep/remove engine. English text is never sent anywhere.
+async function translateToEnglish(text) {
+  const q = text.slice(0, 4000);
+  const base = 'https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t';
+  const res = encodeURIComponent(q).length < 1800
+    ? await fetch(`${base}&q=${encodeURIComponent(q)}`)
+    : await fetch(base, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: `q=${encodeURIComponent(q)}` });
+  if (!res.ok) throw new Error(`Translate service returned ${res.status}`);
+  const data = await res.json();
+  return { translated: (data?.[0] || []).map((part) => part?.[0] || '').join('').trim(), lang: data?.[2] || 'und' };
+}
+
+// Every note goes through automatic translation to English FIRST (the service detects the language;
+// English comes back unchanged). Then the English text is analysed.
+async function prepareText(raw) {
+  const original = String(raw || '').trim();
+  if (!original) return { original: '', text: '', lang: 'en', translated: false };
+  try {
+    const t = await translateToEnglish(original);
+    EG('translated:', t.lang, '|', original.slice(0, 60), '->', t.translated.slice(0, 80));
+    if (!t.translated) throw new Error('empty translation');
+    if (t.lang === 'en') return { original, text: original, lang: 'en', translated: false };
+    return { original, text: t.translated, lang: t.lang, translated: true, originalMarks: analyzeEngagerText(original, state.settings.engagers).marks };
+  } catch (err) {
+    console.error('[ClearComm][popup] translation failed', err);
+    return { original, text: original, lang: 'und', translated: false, failed: true };
+  }
+}
+
+// The "Engagers removal for revisions" row is free text on the portal. Negations and keep-words win
+// ("No", "Do not remove"), otherwise yes/remove-type words mean REMOVE. Anything else -> '' (needs review).
+function defaultFromRaw(raw) {
+  const t = String(raw || '').toLowerCase();
+  if (!t.trim()) return '';
+  if (/\b(no|not|don'?t|dont|never|keep|retain|maintain|leave|preserve)\b/.test(t)) return 'KEEP';
+  if (/\b(yes|remove|removal|replace|delete|cancel|take off)\b/.test(t)) return 'REMOVE';
+  return '';
+}
+
+let analyzing = false;
+async function analyzeEngagers({ rx: rxRaw = '', pref: prefRaw = '', defaultValue = '' }) {
+  if (analyzing) return;
+  analyzing = true;
+  try {
+    const words = state.settings.engagers;
+    // 1) detect language (+ translate to English), 2) proximity engine, 3) priority cascade
+    const [rxPrep, prefPrep] = await Promise.all([prepareText(rxRaw), prepareText(prefRaw)]);
+    const res = resolveEngagerDecision({ rx: rxPrep.text, pref: prefPrep.text, defaultValue, defaultRaw: state.engagerDefaultRaw }, words);
+    EG('decision:', res.decision, '| decided by:', res.decidedBy, '|', res.reason, res.sections);
+    const resultCard = $('#eg-result');
+    resultCard.hidden = false;
+
+    const decided = res.sections.find((sec) => sec.decisive);
+    const WHERE = { rx: 'the Rx', pref: 'the preferences note', default: 'the revisions default' };
+    const ACTION = {
+      KEEP: 'KEEP the engagers',
+      REMOVE: 'REMOVE the engagers',
+      CONFLICT: 'Check manually',
+      REVIEW: 'Check manually'
+    };
+    const cls = res.decision === 'KEEP' ? 'keep' : res.decision === 'REMOVE' ? 'remove' : 'warn';
+    $('#eg-banner').className = `eg-banner ${cls}`;
+    $('#eg-banner-icon').textContent = res.decision === 'KEEP' ? '✔' : res.decision === 'REMOVE' ? '✖' : '!';
+    $('#eg-action').textContent = ACTION[res.decision] || ACTION.REVIEW;
+    $('#eg-banner .eg-caption').textContent = res.decision === 'CONFLICT' || res.decision === 'REVIEW' ? 'Needs you' : 'Recommended';
+
+    // One short reason line.
+    const ev = decided?.evidence?.[0];
+    let basis;
+    if (res.decision === 'CONFLICT') basis = `${decided?.id === 'pref' ? 'The preferences note' : 'The Rx'} says both keep and remove.`;
+    else if (res.decision === 'REVIEW') basis = 'Nothing about engagers was found.';
+    else if (decided?.id === 'default') basis = `Nothing about engagers in the Rx or notes, so the default "${state.engagerDefaultRaw}" applies.`;
+    else if (ev) basis = `From ${WHERE[decided.id]}: "${ev.action}" next to "${ev.term}".`;
+    else basis = res.reason;
+    $('#eg-basis').textContent = basis;
+
+    // The deciding text, translated and highlighted.
+    const quote = $('#eg-quote');
+    quote.textContent = '';
+    const showSec = decided && decided.id !== 'default' ? decided : null;
+    if (showSec && showSec.text.trim()) {
+      const prep = { rx: rxPrep, pref: prefPrep }[showSec.id];
+      const tag = `${showSec.id === 'rx' ? 'Rx' : 'Preferences note'}${prep?.translated ? ` (translated from ${prep.lang})` : ''}`;
+      const body = el('div');
+      body.append(buildHighlighted(showSec.text, showSec.marks));
+      quote.append(el('div', 'eg-quote-tag', tag), body);
+      quote.hidden = false;
+    } else {
+      quote.hidden = true;
+    }
+
+    const wrap = $('#eg-highlight-wrap');
+    wrap.textContent = '';
+    const prepById = { rx: rxPrep, pref: prefPrep };
+    res.sections.forEach((sec) => addSectionBlock(wrap, sec, prepById[sec.id]));
+
+  } finally {
+    analyzing = false;
+  }
+}
+
+const ENGAGER_FETCH_FAILURES = {
+  NOT_PORTAL: 'Open a ClearCorrect page first.',
+  WRONG_PAGE: 'Open a case or setup page to pull this automatically.',
+  NO_SUBMISSION_LINK: "Couldn't find the Submission link on this page.",
+  NO_SUBMISSION_POPUP: "The case submission form didn't open in time."
+};
+
+function updateEngagerPagePill() {
+  const pill = $('#eg-page-pill');
+  const url = state.activeTab?.url || '';
+  if (!isPortalUrl(url)) { pill.className = 'pill off'; pill.textContent = 'Not on ClearCorrect'; return; }
+  if (url.toLowerCase().includes('setup.aspx')) { pill.className = 'pill ok'; pill.textContent = 'Setup page'; return; }
+  if (url.toLowerCase().includes('case.aspx')) { pill.className = 'pill ok'; pill.textContent = 'Case page'; return; }
+  pill.className = 'pill idle';
+  pill.textContent = 'Open a case or setup page';
+}
+
+const debugLines = [];
+const EG = (...a) => {
+  console.log('[ClearComm][popup]', ...a);
+  const line = a.map((x) => (typeof x === 'string' ? x : (() => { try { return JSON.stringify(x); } catch { return String(x); } })())).join(' ');
+  debugLines.push(`${new Date().toLocaleTimeString()}  ${line}`);
+  const box = document.getElementById('eg-debug');
+  if (box) box.value = debugLines.join('\n');
+};
+const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Runs the two page phases directly from the popup (no background worker involved), in every
+// frame of the tab, because the case submission pop-up may live inside an iframe.
+// Runs one page step, in every frame (or only in `frameId`). Never throws: a page reload in the
+// middle of a step just returns [] and the collector re-checks the page.
+function makeExec(tabId) {
+  return async (func, args = [], frameId = null) => {
+    try {
+      const target = frameId == null ? { tabId, allFrames: true } : { tabId, frameIds: [frameId] };
+      const res = await chrome.scripting.executeScript({ target, world: 'MAIN', func, args });
+      return res.map((r) => ({ frameId: r.frameId, result: r.result }));
+    } catch (err) {
+      EG('  step error (page may be reloading):', String(err?.message || err));
+      return [];
+    }
+  };
+}
+
+function setEngagerStep(step, failed = false) {
+  const steps = $$('#eg-steps li');
+  steps.forEach((li) => {
+    const n = Number(li.dataset.step);
+    li.className = n < step ? 'done' : n === step ? (failed ? 'failed' : 'active') : '';
+  });
+}
+
+async function fetchEngagerDataFromPage() {
+  const [freshTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (freshTab) state.activeTab = freshTab;
+  EG('button clicked; tab:', state.activeTab?.id, state.activeTab?.url);
+  const btn = $('#eg-fetch');
+  const status = $('#eg-auto-status');
+  debugLines.length = 0;
+
+  if (!isPortalUrl(state.activeTab?.url)) {
+    flash('Open a ClearCorrect case or setup page first.', 'error');
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Checking…';
+  $('#eg-result').hidden = true;
+  $('#eg-steps').hidden = false;
+  let currentStep = 1;
+  setEngagerStep(1);
+  status.textContent = '';
+
+  let res;
+  try {
+    res = await collectFromCase({
+      url: state.activeTab.url,
+      exec: makeExec(state.activeTab.id),
+      log: EG,
+      progress: (msg, step) => { if (step) { currentStep = step; setEngagerStep(step); } status.textContent = msg; }
+    });
+  } catch (err) {
+    console.error('[ClearComm][popup] collect failed', err);
+    res = { ok: false, error: String(err?.message || err) };
+  }
+
+  btn.disabled = false;
+  btn.textContent = 'Check this case';
+
+  if (!res?.ok) {
+    setEngagerStep(currentStep, true);
+    status.textContent = ENGAGER_FETCH_FAILURES[res?.reason] || `Couldn't read this case (${res?.error || 'unknown error'}).`;
+    return;
+  }
+
+  const rx = res.rxFound ? res.rxText : '';
+  const pref = res.additionalPrefsRaw || '';
+  state.engagerDefaultRaw = res.engagersDefaultRaw || '';
+  state.engagerRxVersion = res.rxFound && res.rxVersionLabel ? `version ${res.rxVersionLabel}` : '';
+  const defaultValue = defaultFromRaw(state.engagerDefaultRaw);
+
+  setEngagerStep(4);
+  status.textContent = res.rxFound ? 'Translating and deciding…' : 'No Rx found in any version. Translating and deciding…';
+  EG('analysing', { rx, pref, defaultValue });
+  await analyzeEngagers({ rx, pref, defaultValue });
+  setEngagerStep(5);                       // every step done
+  status.textContent = res.rxFound ? '' : 'No Rx was found in any version.';
+}
+
+function bindEngagers() {
+  $('#eg-fetch').addEventListener('click', fetchEngagerDataFromPage);
+  $('#eg-debug-copy').addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText($('#eg-debug').value); flash('Debug log copied', 'ok'); }
+    catch { $('#eg-debug').select(); flash('Press Ctrl+C to copy the log', 'info'); }
+  });
+}
+
 /* ================= notes: copy and post ================= */
 
 const fullNoteText = () => state.draft.notes.join(' ');
@@ -619,6 +934,8 @@ function buildTemplateEditor() {
 /* ================= start ================= */
 
 async function init() {
+  window.__clearcommPopupReady = true;
+  console.log('[ClearComm][popup] init');
   state.settings = await getSettings();
   applyAppearance();
 
@@ -635,9 +952,11 @@ async function init() {
   bindSettings();
   syncSettingsUI();
   buildTemplateEditor();
+  bindEngagers();
 
   await loadDraft();
   await detectCase();
+  updateEngagerPagePill();
   await initFirstRunLogin();
 }
 

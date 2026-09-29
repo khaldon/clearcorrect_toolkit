@@ -92,7 +92,7 @@ export const NOTE_CATEGORIES = [
   }
 ];
 
-export const SETTINGS_VERSION = 3;
+export const SETTINGS_VERSION = 4;
 
 export const DEFAULT_SETTINGS = {
   settingsVersion: SETTINGS_VERSION,
@@ -122,12 +122,13 @@ export const DEFAULT_SETTINGS = {
     saveAs: false             // ask where to save every file
   },
   engagers: {
-    translate: false,         // sends the doctor's note to Google Translate when clicked
+    proximity: 6,             // an action word must be within this many words of an engager word
+    requireTarget: true,      // ignore keep/remove wording that is not next to an engager word
     fuzzy: true,              // tolerate small spelling mistakes (attchemnt, engagres ...)
     numbering: 'auto',        // tooth numbering used in Rx notes: auto | fdi | universal
     // Every name doctors use for engagers, in several languages (accents are ignored).
     engagerTerms: [
-      'engager', 'attachment', 'attachement', 'attatchment', 'cleat', 'cleet', 'button', 'botton', 'rests',
+      'engager', 'attachment', 'attachement', 'attatchment', 'cleat', 'cleet', 'button', 'botton', 'rests', 'casts', 'engagers', 'engangers', 'egnegers', 'engagrs', 'egnagers', 'enggers',
       'atache', 'ataches', 'attache', 'attaches', 'aditamento', 'aditamentos', 'boton', 'botones', 'botao', 'botoes',
       'taquet', 'taquets', 'bouton', 'boutons', 'attacco', 'attacchi', 'bottone', 'bottoni', 'knopfchen'
     ],
@@ -135,7 +136,7 @@ export const DEFAULT_SETTINGS = {
       'restore', 'maintain', 'keep', 'retain', 'continue', 'preserve', 'leave',
       'please leave', 'leave current', 'leave existing', 'leave as is',
       'retain all attachments', 'plaster casts', 'keep casts', 'same engagers',
-      'start with same engagers', 'do not cancel', 'please do not cancel',
+      'start with same engagers', 'do not cancel', "don't cancel", 'dont cancel', 'please do not cancel',
       "don't replace", 'do not replace', 'maintain all old rests', 'old attachment',
       'old attachments', 'keep attachments', 'keep engagers', 'maintain attachments', 'maintain engagers',
       // negated wording, so "do not remove" is read as keep

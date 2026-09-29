@@ -1,11 +1,11 @@
 // Engager keep/remove logic, final-Rx technician alerts and tooth-number conversion.
 //
-// Keep/remove priority workflow (stops at the first step that gives an answer):
-//   1. Latest Rx version
-//   2. Earlier Rx versions, newest to oldest
-//   3. Doctor preference profile (additional template preferences)
-//   4. Decline note  -> explicit "Declined / Action Required" (manual review)
-//   5. System default template
+// Engagers tab decision flow (see resolveEngagerDecision below):
+//   P1 Rx instructions (Online Form)  >  P3 Additional treatment preferences note
+//   ... and if neither explicitly mentions engagers -> P2 "Engagers removal for revisions".
+//   Action words must sit within `proximity` words (default 6) of an engager word.
+//   Conflicting KEEP/REMOVE inside the SAME section -> CONFLICT (needs review).
+// (decide() further down is the older multi-version workflow; the popup no longer uses it.)
 
 /* ======================= text helpers ======================= */
 
@@ -24,10 +24,34 @@ export function escapeRegExp(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+const LANG_WORDS = {
+  es: 'el los las del que por favor con sin para una se como todos todas mantener conservar quitar retirar dejar eliminar ataches aditamentos botones',
+  fr: 'le les des du et est pas pour avec sans une aux sur ne tous toutes merci garder conserver enlever laisser supprimer taquets boutons',
+  de: 'der die das und nicht mit ohne fur bitte alle ein eine den zu bei behalten belassen entfernen knopfchen',
+  pt: 'os dos nao com sem uma todos obrigado manter deixar remover retirar botoes',
+  it: 'il gli dei delle che non con senza tutti tutte grazie mantenere lasciare rimuovere togliere attacchi bottoni'
+};
+const LANG_SETS = Object.fromEntries(Object.entries(LANG_WORDS).map(([k, v]) => [k, new Set(v.split(' '))]));
+
+/** Cheap local guess: 'en' | 'ar' | 'es' | 'fr' | 'de' | 'pt' | 'it' | 'und' (some other language). */
+export function guessLanguage(text) {
+  const raw = String(text ?? '').replace(/[\u2000-\u206F\u00A0]/g, ' ');
+  if (!raw.trim()) return 'en';
+  if (/[\u0600-\u06FF]/.test(raw)) return 'ar';
+  if (/[\u0400-\u04FF]/.test(raw)) return 'ru';
+  if (/[\u3040-\u30FF\u4E00-\u9FFF\uAC00-\uD7AF]/.test(raw)) return 'und';
+  const toks = tokensOf(fold(raw)).map((t) => t.text);
+  let best = null; let bestScore = 0;
+  for (const [lang, set] of Object.entries(LANG_SETS)) {
+    const score = toks.filter((t) => set.has(t)).length;
+    if (score > bestScore) { best = lang; bestScore = score; }
+  }
+  if (best && (bestScore >= 2 || (bestScore >= 1 && toks.length <= 6))) return best;
+  return /[^\x00-\x7F]/.test(raw) ? 'und' : 'en';
+}
+
 export function isNonEnglish(text) {
-  if (!text) return false;
-  return /[^\x00-\x7F]/.test(text) ||
-    /\b(por|favor|dejar|manter|conserver|quitar|supprimer|remover|ataches|enganchar|mantener|quitar|retirar|deixar|garder|enlever|laisser|mantenere|lasciare|rimuovere|entfernen|behalten)\b/i.test(text);
+  return guessLanguage(text) !== 'en';
 }
 
 const prep = (list) => (Array.isArray(list) ? list : [])
@@ -114,7 +138,9 @@ const NEGATION = /(?:\b(?:do not|don't|dont|never|not|no need to|need not)\s+(?:
 function effective(hit, f) {
   const before = f.slice(Math.max(0, hit.start - 30), hit.start);
   const negated = NEGATION.test(before);
-  return { name: negated ? INVERT[hit.name] : hit.name, negated };
+  const m = negated ? NEGATION.exec(before) : null;
+  const markStart = m ? hit.start - before.length + m.index : hit.start;   // include "do not" in the highlight
+  return { name: negated ? INVERT[hit.name] : hit.name, negated, markStart };
 }
 
 function substringHits(f, list, name) {
@@ -161,6 +187,14 @@ export function analyzeEngagerText(text, words) {
   const fuzzy = words.fuzzy !== false;
   const keep = prep(words.keepWords);
   const remove = prep(words.removeWords);
+  const dist = Number.isFinite(Number(words.proximity)) ? Number(words.proximity) : 6;
+
+  // Words sitting between two spans (0 when they touch or overlap): the "distance" of the proximity rule.
+  const gapWords = (a, b) => {
+    const [first, second] = a.start <= b.start ? [a, b] : [b, a];
+    if (second.start < first.end) return 0;
+    return toks.filter((t) => t.start >= first.end && t.end <= second.start).length;
+  };
 
   const termHits = wordHits(f, toks, prep(words.engagerTerms), { fuzzy, plural: true });
   const topicSpans = topicSpansOf(f, toks, words);
@@ -189,6 +223,7 @@ export function analyzeEngagerText(text, words) {
   // 1) Pair each engager word with the nearest verb before it ("keep the attachments"),
   //    otherwise the nearest one after it ("attachments should be removed").
   const picks = [];
+  const pairs = [];
   const termClauses = [];
   for (const c of clauses) {
     const ct = termHits.filter((t) => inside(t, c));
@@ -197,10 +232,14 @@ export function analyzeEngagerText(text, words) {
     termClauses.push(c);
     if (!cv.length) continue;
     for (const t of ct) {
-      const before = cv.filter((v) => v.start < t.start);
-      const after = cv.filter((v) => v.start >= t.start);
+      // Proximity rule: the action must be within `dist` words of the engager word.
+      const near = cv.filter((v) => gapWords(v, t) <= dist);
+      if (!near.length) continue;
+      const before = near.filter((v) => v.start < t.start);
+      const after = near.filter((v) => v.start >= t.start);
       const best = before.length ? before.reduce((a, b) => (b.start > a.start ? b : a)) : after.reduce((a, b) => (b.start < a.start ? b : a));
       picks.push(best);
+      pairs.push({ t, v: best, c });
     }
   }
 
@@ -210,7 +249,7 @@ export function analyzeEngagerText(text, words) {
 
   // 2) No engager word next to a verb: fall back to the general wording, but ignore
   //    sentences that are about retainers, wires or spaces.
-  if (!used.length) {
+  if (!used.length && words.requireTarget === false) {
     const general = verbs.filter((v) => {
       const c = clauses.find((cl) => inside(v, cl));
       return c && !topicSpans.some((t) => inside(t, c));
@@ -222,10 +261,10 @@ export function analyzeEngagerText(text, words) {
 
   const marks = termHits.map((t) => ({ start: t.start, end: t.end, kind: 'term' }));
   if (!used.length) {
-    return { decision: null, word: '', confidence, negated: false, marks: mergeMarks(marks), teeth: [] };
+    return { decision: null, word: '', confidence, negated: false, marks: mergeMarks(marks), teeth: [], evidence: [] };
   }
 
-  used.forEach((v) => marks.push({ start: v.start, end: v.end, kind: 'verb' }));
+  used.forEach((v) => { const e = effective(v, f); marks.push({ start: e.markStart, end: v.end, kind: 'verb', decision: e.name, negated: e.negated }); });
   const eff = used.map((v) => effective(v, f));
   const names = [...new Set(eff.map((e) => e.name))];
   const first = used[0];
@@ -234,7 +273,27 @@ export function analyzeEngagerText(text, words) {
   const teeth = [];
   sourceClauses.forEach((c) => teeth.push(...extractTeeth(f.slice(c.start, c.end), numbering)));
 
+  // Evidence for the UI: which engager word + which instruction word + the sentence they sit in.
+  const seen = new Set();
+  const evidence = [];
+  for (const { t, v, c } of pairs) {
+    if (!used.includes(v)) continue;
+    const key = `${t.start}:${v.start}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const e = effective(v, f);
+    evidence.push({
+      term: src.slice(t.start, t.end),
+      action: src.slice(v.start, v.end),
+      dictionaryWord: v.word,
+      decision: e.name,
+      negated: e.negated,
+      sentence: src.slice(c.start, c.end).trim()
+    });
+  }
+
   return {
+    evidence,
     decision: names.length === 1 ? names[0] : 'MIXED',
     word: names.length === 1 ? first.word : '',
     confidence,
@@ -583,4 +642,76 @@ export function analyzeFinalRx(text, words) {
 
   const numbering = detectNumbering(text, words.numbering, clauses.map(fold));
   return items.map(({ _fc, ...item }) => ({ ...item, numbering, teeth: extractTeeth(_fc, numbering) }));
+}
+
+/* ======================= Engagers tab: 3-section priority ======================= */
+
+const SECTION_LABELS = {
+  rx: 'Priority 1 · Rx instructions (Online Form)',
+  default: 'Priority 2 · Engagers removal for revisions (default)',
+  pref: 'Priority 3 · Additional treatment preferences notes'
+};
+
+const explicit = (a) => !!a && (a.decision === 'KEEP' || a.decision === 'REMOVE' || a.decision === 'MIXED');
+
+/**
+ * Combines the three sections into one decision.
+ *   input:  { rx, pref, defaultValue }   (rx / pref are English text; defaultValue is 'KEEP' | 'REMOVE' | '')
+ *   output: { decision: 'KEEP'|'REMOVE'|'CONFLICT'|'REVIEW', decidedBy: 'rx'|'pref'|'default'|null,
+ *             reason, sections: [rx, default, pref] }
+ * Rules: P1 wins over P3; P2 is only the fallback when neither P1 nor P3 mentions engagers;
+ * KEEP and REMOVE both present inside the SAME section -> CONFLICT (never silently picked).
+ */
+export function resolveEngagerDecision({ rx = '', pref = '', defaultValue = '', defaultRaw = '' } = {}, words) {
+  const a1 = analyzeEngagerText(rx, words);
+  const a3 = analyzeEngagerText(pref, words);
+
+  const section = (id, priority, text, a) => ({
+    id, priority, label: SECTION_LABELS[id], text: String(text || ''),
+    decision: a?.decision || null, word: a?.word || '', negated: !!a?.negated,
+    confidence: a?.confidence || null, marks: a?.marks || [], teeth: a?.teeth || [],
+    evidence: a?.evidence || [],
+    mentionsEngagers: !!a && (a.marks || []).some((m) => m.kind === 'term'),
+    decisive: false, note: ''
+  });
+  const s1 = section('rx', 1, rx, a1);
+  const s3 = section('pref', 3, pref, a3);
+  const s2 = { id: 'default', priority: 2, label: SECTION_LABELS.default, text: '', decision: defaultValue || null, word: '', negated: false, marks: [], teeth: [], evidence: defaultValue ? [{ term: 'Engagers removal for revisions', action: defaultRaw || defaultValue, dictionaryWord: '', decision: defaultValue, negated: false, sentence: `Page value: "${defaultRaw || defaultValue}"` }] : [], decisive: false, note: '' };
+
+  let decision; let decidedBy; let reason;
+
+  if (explicit(a1)) {
+    decidedBy = 'rx';
+    if (a1.decision === 'MIXED') {
+      decision = 'CONFLICT';
+      reason = 'The Rx instructions contain both KEEP and REMOVE wording for engagers. Read them and decide manually.';
+    } else {
+      decision = a1.decision;
+      reason = `The Rx instructions explicitly say ${decision}${a1.word ? ` ("${a1.word}")` : ''}${a1.negated ? ' (reversed by a negation)' : ''}.`;
+      if (explicit(a3) && a3.decision !== 'MIXED' && a3.decision !== decision) {
+        s3.note = `Disagrees with the Rx (${a3.decision}) - ignored because the Rx has higher priority.`;
+        reason += ' It overrides the contradicting Additional Preferences note.';
+      }
+    }
+  } else if (explicit(a3)) {
+    decidedBy = 'pref';
+    if (a3.decision === 'MIXED') {
+      decision = 'CONFLICT';
+      reason = 'The Additional Treatment Preferences note contains both KEEP and REMOVE wording for engagers. Read it and decide manually.';
+    } else {
+      decision = a3.decision;
+      reason = `The Rx did not mention engagers, so the Additional Preferences note decides: ${decision}${a3.word ? ` ("${a3.word}")` : ''}${a3.negated ? ' (reversed by a negation)' : ''}.`;
+    }
+  } else if (defaultValue === 'KEEP' || defaultValue === 'REMOVE') {
+    decision = defaultValue; decidedBy = 'default';
+    reason = 'Neither the Rx nor the Additional Preferences note mentions engagers, so the "Engagers removal for revisions" default applies.';
+  } else {
+    decision = 'REVIEW'; decidedBy = null;
+    reason = 'No instruction about engagers in the Rx or the notes, and the revisions default is not set. Pick Keep or Remove under Priority 2.';
+  }
+
+  const byId = { rx: s1, default: s2, pref: s3 };
+  if (decidedBy) byId[decidedBy].decisive = true;
+  if (decidedBy !== 'default' && defaultValue) s2.note = 'Not used: a higher-priority section already answered.';
+  return { decision, decidedBy, reason, sections: [s1, s2, s3] };
 }

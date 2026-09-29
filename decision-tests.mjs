@@ -1,0 +1,17 @@
+import { DEFAULT_SETTINGS } from './shared/defaults.js';
+import { resolveEngagerDecision as r, guessLanguage as g } from './shared/engagers.js';
+const w = DEFAULT_SETTINGS.engagers;
+const t = (rx, pref, d='') => { const o = r({rx,pref,defaultValue:d}, w); console.log(JSON.stringify(rx).slice(0,50), '|', JSON.stringify(pref).slice(0,40), d, '=>', o.decision, o.decidedBy); };
+t('Please keep the attachments', 'remove all engagers');
+t('Do not remove attachments', '', 'REMOVE');
+t('Keep engagers on upper, remove engagers on lower', '');
+t('', 'please replace the attachments', 'KEEP');
+t('close spaces', 'nothing', 'REMOVE');
+t('', '', '');
+t('Remove all of the old ones that were placed last year on the upper teeth and the attachments', '', 'KEEP');
+t('mantener los ataches', '');
+t('start with same engangers', '', 'REMOVE');
+t('Leave existing casts', '', 'REMOVE');
+t("don't cancel the rests", '', 'REMOVE');
+t('remove the wire retainer', '', 'KEEP');
+console.log(g('Por favor mantener los ataches'), g('keep attachments'), g('يرجى إزالة'), g('mantener'));

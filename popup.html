@@ -25,6 +25,7 @@
 
   <nav class="tabs" role="tablist" aria-label="Tools">
     <button class="tab" role="tab" data-tab="notes" id="tab-notes" aria-controls="panel-notes" aria-selected="true">Notes</button>
+    <button class="tab" role="tab" data-tab="engagers" id="tab-engagers" aria-controls="panel-engagers" aria-selected="false" tabindex="-1">Engagers</button>
     <button class="tab" role="tab" data-tab="settings" id="tab-settings" aria-controls="panel-settings" aria-selected="false" tabindex="-1">Settings</button>
   </nav>
 
@@ -70,6 +71,51 @@
         <button id="copy-btn" class="btn secondary" type="button" disabled>Copy</button>
         <button id="post-btn" class="btn primary grow" type="button" disabled>Post to portal</button>
       </div>
+    </div>
+  </section>
+
+  <!-- ============ ENGAGERS ============ -->
+  <section class="panel" id="panel-engagers" role="tabpanel" aria-labelledby="tab-engagers" hidden>
+    <div class="scroll">
+
+      <div class="card">
+        <div class="form-head">
+          <h3>Engagers: keep or remove?</h3>
+          <span id="eg-page-pill" class="pill idle"></span>
+        </div>
+        <button id="eg-fetch" class="btn primary block" type="button">Check this case</button>
+        <ol id="eg-steps" class="eg-steps" hidden>
+          <li data-step="1"><span class="eg-dot"></span>Open the submission</li>
+          <li data-step="2"><span class="eg-dot"></span>Find the Rx</li>
+          <li data-step="3"><span class="eg-dot"></span>Read preferences</li>
+          <li data-step="4"><span class="eg-dot"></span>Decide</li>
+        </ol>
+        <p id="eg-auto-status" class="muted small" aria-live="polite"></p>
+      </div>
+
+      <div id="eg-result" class="eg-result" hidden>
+        <div id="eg-banner" class="eg-banner">
+          <div id="eg-banner-icon" class="eg-banner-icon" aria-hidden="true"></div>
+          <div class="eg-banner-text">
+            <div class="eg-caption">Recommended</div>
+            <div id="eg-action" class="eg-action"></div>
+            <div id="eg-basis" class="eg-basis"></div>
+          </div>
+        </div>
+        <div id="eg-quote" class="eg-quote" hidden></div>
+        <details class="advanced">
+          <summary>Show all details</summary>
+          <p class="eg-legend small muted">Highlights: <mark class="eg-mark-term">engager word</mark> <mark class="eg-mark-keep">keep</mark> <mark class="eg-mark-remove">remove</mark></p>
+          <div id="eg-highlight-wrap"></div>
+        </details>
+      </div>
+
+      <details class="advanced">
+        <summary>Troubleshooting log</summary>
+        <textarea id="eg-debug" rows="6" readonly placeholder="Appears after you click the button."></textarea>
+        <button id="eg-debug-copy" class="btn secondary small" type="button">Copy log</button>
+      </details>
+
     </div>
   </section>
 
@@ -121,6 +167,23 @@
       </div>
 
       <div class="card settings-card">
+        <h3>Engager detection</h3>
+        <label class="toggle">
+          <input type="checkbox" data-setting="engagers.fuzzy">
+          <span class="switch"></span>
+          <span>Tolerate small spelling mistakes<small>e.g. "attchemnt", "engagres"</small></span>
+        </label>
+        <div class="setting">
+          <label for="s-numbering">Tooth numbering in notes</label>
+          <select id="s-numbering" data-setting="engagers.numbering">
+            <option value="auto">Detect automatically</option>
+            <option value="fdi">Always FDI / ISO</option>
+            <option value="universal">Always Universal / American</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="card settings-card">
         <h3>Reminder banner</h3>
         <label class="toggle">
           <input type="checkbox" data-setting="toast.enabled">
@@ -165,5 +228,6 @@
 </div>
 
 <script type="module" src="popup.js"></script>
+<script src="boot.js"></script>
 </body>
 </html>
