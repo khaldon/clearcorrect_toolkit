@@ -404,7 +404,7 @@ function evidenceList(evidence, sourceName) {
   evidence.forEach((ev) => {
     const li = el('li');
     const kw = (t) => { const n = el('span', 'eg-kw', t); return n; };
-    if (sourceName === 'default') {
+    if (ev.yesno) {
       li.append('Page value ', kw(`"${ev.action}"`), ` → read as ${ev.decision}`);
     } else {
       li.append(kw(`"${ev.action}"`), ev.negated ? ' (negated, so reversed)' : '', ' next to ', kw(`"${ev.term}"`), ` → ${ev.decision}`);
@@ -417,19 +417,16 @@ function evidenceList(evidence, sourceName) {
 
 // One block per section: title + verdict badge + "DECIDED" badge, optional original/translation, highlighted text.
 function addSectionBlock(wrap, sec, prep) {
-  const block = el('div', `eg-highlight-block${sec.decisive ? ' decisive' : ''}${!sec.decisive && sec.priority !== 2 && !sec.decision ? ' muted-block' : ''}`);
+  const block = el('div', `eg-highlight-block${sec.decisive ? ' decisive' : ''}${!sec.decisive && !sec.decision ? ' muted-block' : ''}`);
   const label = el('div', 'eg-highlight-label', sec.id === 'rx' && state.engagerRxVersion ? `${sec.label} - ${state.engagerRxVersion}` : sec.label);
   const verdictText = sec.decision === 'MIXED' ? 'CONFLICT' : sec.decision || 'no instruction';
   label.append(el('span', `eg-badge ${BADGE_CLASS[sec.decision] || 'idle'}`, verdictText));
   if (sec.decisive) label.append(el('span', 'eg-badge used', 'USED FOR THE DECISION'));
-  else if (sec.evidence?.length && sec.priority !== 2) label.append(el('span', 'eg-badge over', 'OVERRIDDEN'));
-  else if (sec.priority === 2) label.append(el('span', 'eg-badge idle', 'NOT NEEDED'));
+  else if (sec.decision) label.append(el('span', 'eg-badge over', 'NOT USED'));
   block.append(label);
 
-  if (sec.priority === 2) {
-    block.append(el('div', null, state.engagerDefaultRaw ? `Page value: "${state.engagerDefaultRaw}"${sec.decision ? '' : ' (could not be read as keep or remove)'}` : 'No value read from the page.'));
-  } else if (!sec.text.trim()) {
-    block.append(el('div', 'muted', sec.id === 'rx' ? 'No Rx instructions found in any version.' : 'Empty - nothing written here.'));
+  if (!sec.text.trim()) {
+    block.append(el('div', 'muted', sec.id === 'rx' ? 'No Rx instructions found in any version.' : sec.id === 'default' ? 'Not found on the page.' : 'Empty - nothing written here.'));
   } else {
     if (prep?.translated) {
       const orig = el('div', 'eg-original');
@@ -440,20 +437,18 @@ function addSectionBlock(wrap, sec, prep) {
       block.append(el('div', 'eg-highlight-label', `English translation (detected: ${prep.lang})`));
     } else if (prep?.failed) {
       block.append(el('div', 'eg-note', 'Automatic translation was not available - analysed as written (the built-in multilingual keywords still apply).'));
-    } else if (prep) {
-      block.append(el('div', 'eg-note', 'Language detected: English (no translation needed).'));
     }
     const body = el('div');
     body.append(buildHighlighted(sec.text, sec.marks));
     block.append(body);
   }
-  if (sec.evidence?.length && sec.priority !== 2) block.append(evidenceList(sec.evidence, sec.id));
+  if (sec.evidence?.length) block.append(evidenceList(sec.evidence, sec.id));
   if (sec.note) block.append(el('div', 'eg-note', sec.note));
   wrap.append(block);
 }
 
-// Translation is always on: text that is not English is sent to Google Translate first and the
-// English result goes through the keep/remove engine. English text is never sent anywhere.
+// Every note goes through automatic translation to English first (Google Translate detects the language;
+// English comes back unchanged), then the English text is analysed.
 async function translateToEnglish(text) {
   const q = text.slice(0, 4000);
   const base = 'https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t';
@@ -482,31 +477,22 @@ async function prepareText(raw) {
   }
 }
 
-// The "Engagers removal for revisions" row is free text on the portal. Negations and keep-words win
-// ("No", "Do not remove"), otherwise yes/remove-type words mean REMOVE. Anything else -> '' (needs review).
-function defaultFromRaw(raw) {
-  const t = String(raw || '').toLowerCase();
-  if (!t.trim()) return '';
-  if (/\b(no|not|don'?t|dont|never|keep|retain|maintain|leave|preserve)\b/.test(t)) return 'KEEP';
-  if (/\b(yes|remove|removal|replace|delete|cancel|take off)\b/.test(t)) return 'REMOVE';
-  return '';
-}
-
 let analyzing = false;
-async function analyzeEngagers({ rx: rxRaw = '', pref: prefRaw = '', defaultValue = '' }) {
+async function analyzeEngagers({ rx: rxRaw = '', pref: prefRaw = '', defaultRaw: defRaw = '' }) {
   if (analyzing) return;
   analyzing = true;
   try {
     const words = state.settings.engagers;
     // 1) detect language (+ translate to English), 2) proximity engine, 3) priority cascade
-    const [rxPrep, prefPrep] = await Promise.all([prepareText(rxRaw), prepareText(prefRaw)]);
-    const res = resolveEngagerDecision({ rx: rxPrep.text, pref: prefPrep.text, defaultValue, defaultRaw: state.engagerDefaultRaw }, words);
+    const [rxPrep, prefPrep, defPrep] = await Promise.all([prepareText(rxRaw), prepareText(prefRaw), prepareText(defRaw)]);
+    const res = resolveEngagerDecision({ rx: rxPrep.text, pref: prefPrep.text, defaultRaw: defPrep.text }, words);
     EG('decision:', res.decision, '| decided by:', res.decidedBy, '|', res.reason, res.sections);
     const resultCard = $('#eg-result');
     resultCard.hidden = false;
 
     const decided = res.sections.find((sec) => sec.decisive);
     const WHERE = { rx: 'the Rx', pref: 'the preferences note', default: 'the revisions default' };
+    const decidedEv = decided?.evidence?.[0];
     const ACTION = {
       KEEP: 'KEEP the engagers',
       REMOVE: 'REMOVE the engagers',
@@ -522,9 +508,9 @@ async function analyzeEngagers({ rx: rxRaw = '', pref: prefRaw = '', defaultValu
     // One short reason line.
     const ev = decided?.evidence?.[0];
     let basis;
-    if (res.decision === 'CONFLICT') basis = `${decided?.id === 'pref' ? 'The preferences note' : 'The Rx'} says both keep and remove.`;
+    if (res.decision === 'CONFLICT') basis = `${{ rx: 'The Rx', pref: 'The preferences note', default: 'The revisions default' }[decided?.id] || 'The text'} says both keep and remove.`;
     else if (res.decision === 'REVIEW') basis = 'Nothing about engagers was found.';
-    else if (decided?.id === 'default') basis = `Nothing about engagers in the Rx or notes, so the default "${state.engagerDefaultRaw}" applies.`;
+    else if (decidedEv?.yesno) basis = `Nothing about engagers in the Rx or notes, so the revisions default "${decidedEv.action}" applies.`;
     else if (ev) basis = `From ${WHERE[decided.id]}: "${ev.action}" next to "${ev.term}".`;
     else basis = res.reason;
     $('#eg-basis').textContent = basis;
@@ -532,10 +518,10 @@ async function analyzeEngagers({ rx: rxRaw = '', pref: prefRaw = '', defaultValu
     // The deciding text, translated and highlighted.
     const quote = $('#eg-quote');
     quote.textContent = '';
-    const showSec = decided && decided.id !== 'default' ? decided : null;
+    const showSec = decided && !decidedEv?.yesno ? decided : null;
     if (showSec && showSec.text.trim()) {
-      const prep = { rx: rxPrep, pref: prefPrep }[showSec.id];
-      const tag = `${showSec.id === 'rx' ? 'Rx' : 'Preferences note'}${prep?.translated ? ` (translated from ${prep.lang})` : ''}`;
+      const prep = { rx: rxPrep, pref: prefPrep, default: defPrep }[showSec.id];
+      const tag = `${showSec.id === 'rx' ? 'Rx' : showSec.id === 'pref' ? 'Preferences note' : 'Revisions default'}${prep?.translated ? ` (translated from ${prep.lang})` : ''}`;
       const body = el('div');
       body.append(buildHighlighted(showSec.text, showSec.marks));
       quote.append(el('div', 'eg-quote-tag', tag), body);
@@ -546,7 +532,7 @@ async function analyzeEngagers({ rx: rxRaw = '', pref: prefRaw = '', defaultValu
 
     const wrap = $('#eg-highlight-wrap');
     wrap.textContent = '';
-    const prepById = { rx: rxPrep, pref: prefPrep };
+    const prepById = { rx: rxPrep, pref: prefPrep, default: defPrep };
     res.sections.forEach((sec) => addSectionBlock(wrap, sec, prepById[sec.id]));
 
   } finally {
@@ -653,12 +639,11 @@ async function fetchEngagerDataFromPage() {
   const pref = res.additionalPrefsRaw || '';
   state.engagerDefaultRaw = res.engagersDefaultRaw || '';
   state.engagerRxVersion = res.rxFound && res.rxVersionLabel ? `version ${res.rxVersionLabel}` : '';
-  const defaultValue = defaultFromRaw(state.engagerDefaultRaw);
 
   setEngagerStep(4);
   status.textContent = res.rxFound ? 'Translating and deciding…' : 'No Rx found in any version. Translating and deciding…';
-  EG('analysing', { rx, pref, defaultValue });
-  await analyzeEngagers({ rx, pref, defaultValue });
+  EG('analysing', { rx, pref, defaultRaw: state.engagerDefaultRaw });
+  await analyzeEngagers({ rx, pref, defaultRaw: state.engagerDefaultRaw });
   setEngagerStep(5);                       // every step done
   status.textContent = res.rxFound ? '' : 'No Rx was found in any version.';
 }

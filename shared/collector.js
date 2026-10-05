@@ -2,7 +2,7 @@
 // returns [{ frameId, result }] (empty on error). Everything is re-checked after every step, so a
 // page reload / postback in the middle cannot break the flow.
 import {
-  stepClickLastSubmission, stepProbe, stepReadRx, stepPrevVersion, stepReadPrefs
+  stepClickLastSubmission, stepProbe, stepReadRx, stepNextVersion, stepIsIdle, stepReadPrefs
 } from './page-collect.js';
 
 const defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -51,20 +51,22 @@ export async function collectFromCase({ url, exec, log = () => {}, progress = ()
   if (!found) return { ok: false, reason: 'NO_SUBMISSION_POPUP' };
   log('submission pop-up found in frame', found.frameId, JSON.stringify(found.probe));
 
-  /* ---- 2. find the Online Form (Rx), stepping back through versions ---- */
+  /* ---- 2. find the Online Form (Rx): try every version that is not a "Revision" header ---- */
   const versionsChecked = [];
+  const visited = [];
   let rxText = '';
   let rxVersionLabel = null;
   let frameId = found.frameId;
   let noAnswer = 0;
 
   for (let i = 0; i < maxVersions; i++) {
-    let cur = await findContainer(8000);
+    const cur = await findContainer(8000);
     if (!cur) return { ok: false, reason: 'NO_SUBMISSION_POPUP' };
     frameId = cur.frameId;
     const probe = cur.probe;
-    progress(`Looking for the Rx${probe.versionText ? ` (version ${probe.versionText})` : ''}…`, 2);
-    log(`check ${i + 1}: version "${probe.versionText}" (${probe.versionIndex + 1}/${probe.versionCount}) | Online Form tab visible:`, probe.formTabVisible);
+    if (!visited.includes(probe.versionIndex)) visited.push(probe.versionIndex);
+    progress(`Looking for the Rx${probe.versionText ? ` (${probe.versionText})` : ''}…`, 2);
+    log(`check ${i + 1}: version "${probe.versionText}" (index ${probe.versionIndex}/${probe.versionCount}) | Online Form tab visible:`, probe.formTabVisible);
 
     if (probe.formTabVisible) {
       const rxRes = (await exec(stepReadRx, [], frameId))[0]?.result;
@@ -73,25 +75,28 @@ export async function collectFromCase({ url, exec, log = () => {}, progress = ()
     }
 
     versionsChecked.push(probe.versionText || `#${probe.versionIndex}`);
-    progress('No Rx in this version, trying an older one…', 2);
-    const prev = (await exec(stepPrevVersion, [], frameId))[0]?.result;
-    log('  previous version step:', JSON.stringify(prev));
-    if (!prev) {                                        // page probably reloaded; re-check it
+    progress('No Rx in this version, trying another one…', 2);
+    const next = (await exec(stepNextVersion, [{ visited }], frameId))[0]?.result;
+    log('  next version step:', JSON.stringify(next));
+    if (!next) {                                         // page probably reloaded; re-check it
       if (++noAnswer >= 3) { log('  no answer from the page 3 times in a row, stopping the version search'); break; }
       await sleep(1500);
       continue;
     }
     noAnswer = 0;
-    if (!prev.ok || prev.reachedEnd) break;
+    if (!next.ok || next.reachedEnd) break;
 
-    // wait for the postback to finish: the dropdown must show the older version
-    await sleep(800);
+    // wait until the page has finished the postback (Sys.WebForms request manager), like the console script
+    await sleep(700);
+    if (next.hasPrm === false) await sleep(1500);
     const end = Date.now() + 12000;
     while (Date.now() < end) {
-      const c = await findContainer(1500);
-      if (c && c.probe.versionIndex === prev.targetIndex) break;
+      const idle = (await exec(stepIsIdle, [], frameId))[0]?.result
+        || (await exec(stepIsIdle, []))[0]?.result;
+      if (idle && idle.container && !idle.busy) break;
       await sleep(400);
     }
+    await sleep(400);
   }
 
   /* ---- 3. Treatment Preferences tab ---- */

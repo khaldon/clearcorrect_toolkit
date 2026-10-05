@@ -646,72 +646,89 @@ export function analyzeFinalRx(text, words) {
 
 /* ======================= Engagers tab: 3-section priority ======================= */
 
-const SECTION_LABELS = {
-  rx: 'Priority 1 · Rx instructions (Online Form)',
-  default: 'Priority 2 · Engagers removal for revisions (default)',
-  pref: 'Priority 3 · Additional treatment preferences notes'
+const SECTION_TITLES = {
+  rx: 'Rx instructions (Online Form)',
+  pref: 'Additional treatment preferences notes',
+  default: 'Engagers removal for revisions'
 };
 
 const explicit = (a) => !!a && (a.decision === 'KEEP' || a.decision === 'REMOVE' || a.decision === 'MIXED');
 
+/** Plain "Yes" / "No" style value of the revisions row (no engager wording): No -> KEEP, Yes -> REMOVE. */
+export function defaultFromYesNo(raw) {
+  const t = String(raw || '').toLowerCase();
+  if (!t.trim()) return '';
+  if (/\b(no|not|don'?t|dont|never|keep|retain|maintain|leave|preserve)\b/.test(t)) return 'KEEP';
+  if (/\b(yes|remove|removal|replace|delete|cancel|take off)\b/.test(t)) return 'REMOVE';
+  return '';
+}
+
 /**
- * Combines the three sections into one decision.
- *   input:  { rx, pref, defaultValue }   (rx / pref are English text; defaultValue is 'KEEP' | 'REMOVE' | '')
- *   output: { decision: 'KEEP'|'REMOVE'|'CONFLICT'|'REVIEW', decidedBy: 'rx'|'pref'|'default'|null,
- *             reason, sections: [rx, default, pref] }
- * Rules: P1 wins over P3; P2 is only the fallback when neither P1 nor P3 mentions engagers;
- * KEEP and REMOVE both present inside the SAME section -> CONFLICT (never silently picked).
+ * Combines the three sources into one decision (all texts already translated to English).
+ *   input:  { rx, pref, defaultRaw }
+ *   output: { decision: 'KEEP'|'REMOVE'|'CONFLICT'|'REVIEW', decidedBy: 'rx'|'pref'|'default'|null, reason, sections }
+ *
+ * Order of authority:
+ *   1. Rx instructions                      (if it mentions engagers)
+ *   2. Additional treatment preferences     (if it says keep / remove)
+ *   3. Engagers removal for revisions       (final default: a plain Yes / No)
+ *  ...except that when the "Engagers removal for revisions" value itself contains engager wording
+ *  (e.g. "Don't remove engagers") it is promoted to 2nd place, above the preferences note.
+ * KEEP and REMOVE together inside ONE source -> CONFLICT (never silently picked).
  */
-export function resolveEngagerDecision({ rx = '', pref = '', defaultValue = '', defaultRaw = '' } = {}, words) {
-  const a1 = analyzeEngagerText(rx, words);
-  const a3 = analyzeEngagerText(pref, words);
+export function resolveEngagerDecision({ rx = '', pref = '', defaultRaw = '' } = {}, words) {
+  const aRx = analyzeEngagerText(rx, words);
+  const aPref = analyzeEngagerText(pref, words);
+  const aDef = analyzeEngagerText(defaultRaw, words);
+  const defHasKeywords = explicit(aDef);
+  const yesNo = defHasKeywords ? '' : defaultFromYesNo(defaultRaw);
 
-  const section = (id, priority, text, a) => ({
-    id, priority, label: SECTION_LABELS[id], text: String(text || ''),
-    decision: a?.decision || null, word: a?.word || '', negated: !!a?.negated,
-    confidence: a?.confidence || null, marks: a?.marks || [], teeth: a?.teeth || [],
-    evidence: a?.evidence || [],
-    mentionsEngagers: !!a && (a.marks || []).some((m) => m.kind === 'term'),
-    decisive: false, note: ''
+  const order = defHasKeywords ? ['rx', 'default', 'pref'] : ['rx', 'pref', 'default'];
+  const texts = { rx, pref, default: defaultRaw };
+  const analyses = { rx: aRx, pref: aPref, default: aDef };
+
+  const sections = order.map((id, i) => {
+    const a = analyses[id];
+    const isYesNo = id === 'default' && !defHasKeywords;
+    const decision = isYesNo ? (yesNo || null) : (a?.decision || null);
+    let label = `Priority ${i + 1} · ${SECTION_TITLES[id]}`;
+    if (id === 'default') label += defHasKeywords ? ' (has engager wording)' : ' (final default)';
+    return {
+      id, priority: i + 1, label, text: String(texts[id] || ''),
+      decision, kind: isYesNo ? 'yesno' : 'keywords',
+      word: a?.word || '', negated: !!a?.negated, confidence: a?.confidence || null,
+      marks: isYesNo ? [] : (a?.marks || []), teeth: a?.teeth || [],
+      evidence: isYesNo
+        ? (yesNo ? [{ yesno: true, term: SECTION_TITLES.default, action: String(defaultRaw).trim(), dictionaryWord: '', decision: yesNo, negated: false, sentence: '' }] : [])
+        : (a?.evidence || []),
+      decisive: false, note: ''
+    };
   });
-  const s1 = section('rx', 1, rx, a1);
-  const s3 = section('pref', 3, pref, a3);
-  const s2 = { id: 'default', priority: 2, label: SECTION_LABELS.default, text: '', decision: defaultValue || null, word: '', negated: false, marks: [], teeth: [], evidence: defaultValue ? [{ term: 'Engagers removal for revisions', action: defaultRaw || defaultValue, dictionaryWord: '', decision: defaultValue, negated: false, sentence: `Page value: "${defaultRaw || defaultValue}"` }] : [], decisive: false, note: '' };
 
-  let decision; let decidedBy; let reason;
+  let decision = 'REVIEW';
+  let decidedBy = null;
+  let reason = 'No instruction about engagers was found in the Rx, the notes or the revisions default.';
 
-  if (explicit(a1)) {
-    decidedBy = 'rx';
-    if (a1.decision === 'MIXED') {
+  for (const sec of sections) {
+    if (!sec.decision) continue;
+    decidedBy = sec.id;
+    sec.decisive = true;
+    if (sec.decision === 'MIXED') {
       decision = 'CONFLICT';
-      reason = 'The Rx instructions contain both KEEP and REMOVE wording for engagers. Read them and decide manually.';
+      reason = `${SECTION_TITLES[sec.id]} contains both KEEP and REMOVE wording for engagers.`;
     } else {
-      decision = a1.decision;
-      reason = `The Rx instructions explicitly say ${decision}${a1.word ? ` ("${a1.word}")` : ''}${a1.negated ? ' (reversed by a negation)' : ''}.`;
-      if (explicit(a3) && a3.decision !== 'MIXED' && a3.decision !== decision) {
-        s3.note = `Disagrees with the Rx (${a3.decision}) - ignored because the Rx has higher priority.`;
-        reason += ' It overrides the contradicting Additional Preferences note.';
-      }
+      decision = sec.decision;
+      reason = `${SECTION_TITLES[sec.id]} says ${decision}${sec.word ? ` ("${sec.word}")` : ''}${sec.negated ? ' (reversed by a negation)' : ''}.`;
     }
-  } else if (explicit(a3)) {
-    decidedBy = 'pref';
-    if (a3.decision === 'MIXED') {
-      decision = 'CONFLICT';
-      reason = 'The Additional Treatment Preferences note contains both KEEP and REMOVE wording for engagers. Read it and decide manually.';
-    } else {
-      decision = a3.decision;
-      reason = `The Rx did not mention engagers, so the Additional Preferences note decides: ${decision}${a3.word ? ` ("${a3.word}")` : ''}${a3.negated ? ' (reversed by a negation)' : ''}.`;
-    }
-  } else if (defaultValue === 'KEEP' || defaultValue === 'REMOVE') {
-    decision = defaultValue; decidedBy = 'default';
-    reason = 'Neither the Rx nor the Additional Preferences note mentions engagers, so the "Engagers removal for revisions" default applies.';
-  } else {
-    decision = 'REVIEW'; decidedBy = null;
-    reason = 'No instruction about engagers in the Rx or the notes, and the revisions default is not set. Pick Keep or Remove under Priority 2.';
+    break;
   }
 
-  const byId = { rx: s1, default: s2, pref: s3 };
-  if (decidedBy) byId[decidedBy].decisive = true;
-  if (decidedBy !== 'default' && defaultValue) s2.note = 'Not used: a higher-priority section already answered.';
-  return { decision, decidedBy, reason, sections: [s1, s2, s3] };
+  // Notes on the sources that were not used.
+  const decidedIdx = sections.findIndex((x) => x.decisive);
+  sections.forEach((sec, i) => {
+    if (sec.decisive || decidedIdx === -1 || i < decidedIdx) return;
+    if (sec.decision && sec.decision !== 'MIXED' && sec.decision !== decision) sec.note = `Says ${sec.decision}, but a higher-priority source decided.`;
+  });
+
+  return { decision, decidedBy, reason, sections };
 }

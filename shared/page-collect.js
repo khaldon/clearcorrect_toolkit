@@ -34,7 +34,7 @@ export function stepProbe() {
   if (!container) return { hasContainer: false };
   // engagers.txt -> findOnlineForm(): tab present AND visible (offsetHeight > 0)
   const tab = document.getElementById(`${C}_tpForm_tab`);
-  const formTabVisible = !!tab && (tab.offsetHeight > 0 || tab.offsetWidth > 0);
+  const formTabVisible = !!tab && (tab.offsetParent !== null || tab.offsetHeight > 0);   // automationLoop success check
   const dd = document.getElementById(`${C}_tpFiles_ddlCaseSubmissionID`);
   return {
     hasContainer: true,
@@ -46,14 +46,19 @@ export function stepProbe() {
   };
 }
 
-/* engagers.txt -> onlineFormTab.click() then the rx (instruction) line */
+/* automationLoop success branch + extractData(): click the Online Form tab, let it load, read the Rx */
 export async function stepReadRx() {
   const C = 'ctl00_MainPH_frmCaseSubmission_tcRecord';
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const tab = document.getElementById(`${C}_tpForm_tab`);
-  if (tab) { tab.click(); console.log('[ClearComm] Online Form found! Switching to tab...'); }
+  if (tab) {
+    const innerTab = tab.querySelector('.ajax__tab_inner') || tab.querySelector('.ajax__tab_outer') || tab;
+    innerTab.click();
+    console.log('[ClearComm] SUCCESS: Online Form Tab Found! Clicked it.');
+  }
+  await sleep(1000);                       // let the tab content load before reading
   let label = null;
-  for (let i = 0; i < 25 && !label; i++) {
+  for (let i = 0; i < 15 && !label; i++) {
     label = document.querySelector(`#${C}_tpForm_lblRevInstructions`);
     if (!label) await sleep(200);
   }
@@ -62,39 +67,51 @@ export async function stepReadRx() {
   return { labelFound: !!label, text };
 }
 
-/* engagers.txt -> findOnlineForm(): Files tab -> next (older) version in the dropdown.
-   The actual change is fired AFTER this function returns, so the result reaches the popup
-   even if the page reloads because of the postback. */
-export async function stepPrevVersion() {
+/* automationLoop(): next dropdown entry that is not a "Revision" header (cycling like the script).
+   `visited` = option indexes already checked. The change is fired AFTER this returns, so the
+   result reaches the popup even if the page reloads. */
+export async function stepNextVersion({ visited = [] } = {}) {
   const C = 'ctl00_MainPH_frmCaseSubmission_tcRecord';
-  const DD = `${C}_tpFiles_ddlCaseSubmissionID`;
+  const SELECT_ID = `${C}_tpFiles_ddlCaseSubmissionID`;
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  console.log('[ClearComm] Online Form not found in this version. Navigating to Files to change version...');
-  const filesTab = document.getElementById(`${C}_tpFiles_tab`);
-  if (!filesTab) { console.error('[ClearComm] Could not find Files tab.'); return { ok: false, reason: 'NO_FILES_TAB' }; }
-  filesTab.click();
-  let dropdown = null;
-  for (let i = 0; i < 15 && !dropdown; i++) {
-    await sleep(200);
-    dropdown = document.getElementById(DD);
+  let select = document.getElementById(SELECT_ID);
+  if (!select) {                           // dropdown lives in the Files tab: open it and look again
+    const filesTab = document.getElementById(`${C}_tpFiles_tab`);
+    if (filesTab) filesTab.click();
+    for (let i = 0; i < 15 && !select; i++) { await sleep(200); select = document.getElementById(SELECT_ID); }
   }
-  if (!dropdown) { console.error('[ClearComm] Version dropdown not found in Files tab.'); return { ok: false, reason: 'NO_DROPDOWN' }; }
+  if (!select) { console.error('[ClearComm] Version dropdown not found.'); return { ok: false, reason: 'NO_DROPDOWN' }; }
 
-  const currentIndex = dropdown.selectedIndex;
-  const from = (dropdown.options[currentIndex]?.text || '').trim();
-  if (currentIndex >= dropdown.options.length - 1) {
-    console.log('[ClearComm] Reached the end of the version history. Online Form not found.');
-    return { ok: true, reachedEnd: true, from };
+  const options = select.options;
+  const current = select.selectedIndex;
+  let next = -1;
+  for (let i = 1; i <= options.length; i++) {
+    const idx = (current + i) % options.length;
+    if (!/revision/i.test(options[idx].text) && !visited.includes(idx)) { next = idx; break; }
   }
-  const target = currentIndex + 1;
-  const to = (dropdown.options[target]?.text || '').trim();
-  console.log(`[ClearComm] Switching from version ${from} to older version ${to}...`);
+  if (next === -1 || next === current) {
+    console.log('[ClearComm] No more versions to try.');
+    return { ok: true, reachedEnd: true };
+  }
+  const to = options[next].text.trim();
+  console.log(`[ClearComm] Trying: "${to}"`);
   setTimeout(() => {
-    dropdown.selectedIndex = target;
-    dropdown.dispatchEvent(new Event('change'));
-    if (typeof window.__doPostBack !== 'undefined') window.__doPostBack(DD, '');
+    select.selectedIndex = next;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
   }, 80);
-  return { ok: true, reachedEnd: false, from, to, targetIndex: target };
+  return { ok: true, reachedEnd: false, to, targetIndex: next, hasPrm: !!(window.Sys && window.Sys.WebForms) };
+}
+
+/* Is the pop-up there and the page finished with its (async) postback? */
+export function stepIsIdle() {
+  const container = !!document.getElementById('ctl00_MainPH_frmCaseSubmission_tcRecord');
+  let busy = false;
+  let hasPrm = false;
+  try {
+    const prm = window.Sys && window.Sys.WebForms ? window.Sys.WebForms.PageRequestManager.getInstance() : null;
+    if (prm) { hasPrm = true; busy = !!prm.get_isInAsyncPostBack(); }
+  } catch (e) { /* ignore */ }
+  return { container, busy, hasPrm };
 }
 
 /* engagers.txt -> $find(...).set_activeTabIndex(2), then the two rows */
@@ -117,6 +134,7 @@ export async function stepReadPrefs() {
     if (guess) { guess.click(); switched = true; how = 'header click'; }
   }
   console.log('[ClearComm] Treatment Preferences tab switched:', switched, how);
+  await sleep(1000);                       // wait for the tab switch like extractData()
 
   // engagers.txt: getEngagersRemovalValue() and Additional Treatment Preferences Notes (Option 1)
   const getEngagersRemovalValue = () => {
@@ -127,13 +145,14 @@ export async function stepReadPrefs() {
     });
     return targetRow ? targetRow.cells[1].innerText.trim() : null;
   };
-  // Additional Treatment Preferences Notes: label cell -> next cell, non-breaking spaces cleaned.
+  // Additional Treatment Preferences Notes: exact label cell first, then any row whose first cell contains the label.
   const getNotes = () => {
+    const clean = (v) => String(v || '').replace(/\u00a0/g, ' ').trim();
     const label = 'Additional Treatment Preferences Notes:';
-    const tds = Array.from(document.querySelectorAll('td'));
-    const labelTd = tds.find((td) => td.innerText.trim() === label);
-    const rawValue = labelTd?.nextElementSibling?.innerText || '';
-    return rawValue.replace(/\u00a0/g, ' ').trim();   // "" when effectively empty
+    const labelTd = Array.from(document.querySelectorAll('td')).find((td) => td.innerText.trim() === label);
+    if (labelTd) return clean(labelTd.nextElementSibling?.innerText);
+    const row = Array.from(document.querySelectorAll('tr')).find((tr) => tr.cells[0]?.innerText.includes('Additional Treatment Preferences Notes'));
+    return row && row.cells[1] ? clean(row.cells[1].innerText) : '';
   };
   for (let i = 0; i < 25 && getEngagersRemovalValue() === null; i++) await sleep(200);
   const engagersDefaultRaw = getEngagersRemovalValue();
